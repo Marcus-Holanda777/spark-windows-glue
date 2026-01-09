@@ -12,8 +12,8 @@ O fluxo de dados segue a arquitetura abaixo:
 
 ```mermaid
 graph LR
-    SQL[SQL Server] -->|JDBC Parallel Read| Spark[Spark Cluster Local\n(Windows Standalone)]
-    Spark -->|Write Parquet| LocalStaging[Local Disk\n(Staging)]
+    SQL[SQL Server] -->|JDBC Parallel Read| Spark["Spark Cluster Local (Windows Standalone)"]
+    Spark -->|Write Parquet| LocalStaging["Local Disk (Staging)"]
     LocalStaging -->|Write Iceberg| S3[AWS S3 Bucket]
     Glue[AWS Glue Catalog] -.->|Metastore| S3
 
