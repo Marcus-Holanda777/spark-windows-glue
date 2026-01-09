@@ -208,8 +208,6 @@ python extract_load_jdbc.py
 
 ```
 
----
-
 ## 🐍 Código da Aplicação (`extract_load_jdbc.py`)
 
 O código abaixo realiza a orquestração do pipeline. Note que a variável `LOCAL_FILES` aponta para `M:/lake_house`, garantindo que qualquer Worker possa escrever e ler os dados.
@@ -459,6 +457,68 @@ def main_spark_jdbc(
 
 ```
 
+## 🐍 Detalhes da Implementação Python (`extract_load_jdbc.py`)
+
+O script foi desenhado para ser **modular**. Abaixo, a explicação detalhada de cada componente lógico.
+
+### 1. Modelagem de Dados (`dataclasses`)
+
+Utilizamos `dataclasses` para padronizar a configuração das tabelas e evitar a concatenação manual de strings propensa a erros.
+
+* **`SparkTable`:** Centraliza os metadados da tabela (servidor, banco, schema).
+* *Destaque:* A propriedade `full_name_athena` converte automaticamente a nomenclatura do SQL Server (ex: `DB.Schema.Table`) para o padrão "flat" aceito pelo AWS Glue/Athena (ex: `db_schema_table`), resolvendo conflitos de caracteres.
+
+
+* **`URLMssql`:** Encapsula a complexidade da string de conexão JDBC.
+* *Destaque:* Garante que `integratedSecurity=true` e `trustServerCertificate=true` sejam sempre injetados, permitindo que a autenticação via Windows (DLL) funcione sem expor senhas no código.
+
+### 2. Tratamento Dinâmico de Datas (`parse_date_expressions`)
+
+Permite definir janelas de carga dinâmicas sem alterar o código.
+
+* **Como funciona:** O script aceita *placeholders* na string de condição SQL.
+* **Exemplo:** Se a condição for `data_venda >= '{hoje-3d}'`, e o script rodar dia 15/01, ele traduzirá automaticamente para `data_venda >= '202X-01-12'`.
+* **Benefício:** Facilita o agendamento diário (Cron/Airflow) para cargas incrementais (D-1).
+
+### 3. Estratégia de Leitura Paralela (Otimização JDBC)
+
+O Spark, por padrão, lê tabelas JDBC usando uma única thread (um único executor), o que é extremamente lento para grandes volumes. Implementamos duas estratégias para forçar o paralelismo:
+
+* **`lower_upper_bound(spark, table)`:**
+* Faz uma consulta leve (`SELECT MIN(id), MAX(id)`) no SQL Server antes da extração.
+* Esses valores alimentam os parâmetros `lowerBound` e `upperBound` do Spark. Isso permite que o Spark "fatie" a tabela em N pedaços (baseado no `numPartitions`) e use todos os Workers simultaneamente para baixar os dados.
+
+* **`iter_lower_upper_bound(spark, table)`:**
+* *Uso:* Para tabelas massivas onde um único `lower/upper` ainda sobrecarregaria a memória.
+* *Lógica:* Quebra os IDs em lotes (chunks) menores e processa a extração em loop. Isso evita estouro de memória (OOM) no Driver e nos Executors.
+
+### 4. Camada de Staging (`write_parquet`)
+
+Antes de enviar para a nuvem, os dados são materializados em disco.
+
+* **Destino:** Pasta de rede mapeada (`M:\lake_house`).
+* **Formato:** Parquet com compressão **ZSTD**.
+* **Por que isso é necessário?**
+1. Libera a conexão com o banco de produção (SQL Server) o mais rápido possível.
+2. O upload para o S3 (etapa seguinte) é feito a partir de arquivos Parquet otimizados, e não de uma conexão de banco aberta, o que é mais seguro e estável.
+
+### 5. Carga no Data Lake (`overwrite_table_iceberg`)
+
+Lê os arquivos do Staging e realiza a carga na tabela Iceberg no S3 via catálogo AWS Glue.
+
+* **Propriedades Críticas Definidas:**
+* `write.format.default = parquet`: Padrão da indústria.
+* `write.merge.mode = merge-on-read`: Otimiza a escrita de atualizações/deletes (grava apenas o delta, não reescreve o arquivo todo imediatamente).
+* `write.target-file-size-bytes = 128MB`: Tamanho ideal para performance de leitura em engines como Trino e Athena.
+
+### 6. Manutenção Automática (`optimize_table`)
+
+Tabelas Iceberg (especialmente com *merge-on-read*) tendem a acumular "sujeira" (arquivos pequenos e snapshots antigos). O script executa a limpeza ao final de cada execução:
+
+1. **`rewrite_data_files`:** Compactação (Bin-packing). Junta arquivos pequenos em arquivos de 128MB.
+2. **`expire_snapshots`:** Remove versões antigas da tabela (Time Travel) para economizar armazenamento no S3.
+3. **`remove_orphan_files`:** Garbage collection. Remove arquivos físicos no S3 que não pertencem a nenhum snapshot válido.
+
 ## 📥 Anexos: Downloads e Observações
 
 ### Observações Importantes
@@ -471,7 +531,7 @@ def main_spark_jdbc(
 * **Apache Spark 3.5.7:**
 [Download Spark](https://spark.apache.org/downloads.html)
 * **Java (JDK 11):**
-[Download Microsoft Build of OpenJDK 11](https://learn.microsoft.com/en-us/java/openjdk/download)
+[Java JDK21](https://www.oracle.com/br/java/technologies/downloads/#jdk21-windows)
 * **Driver JDBC SQL Server (mssql-jdbc):**
 [Download Microsoft JDBC Driver for SQL Server](https://learn.microsoft.com/pt-br/sql/connect/jdbc/download-microsoft-jdbc-driver-for-sql-server)
 *(Baixe a versão .zip para extrair a DLL de autenticação)*
