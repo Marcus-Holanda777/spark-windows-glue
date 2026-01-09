@@ -1,16 +1,11 @@
-from pyspark.sql import SparkSession, DataFrame
-from pyspark.sql.functions import col
-import pyspark.sql.types as tp
-import pyspark.sql.functions as fn
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 import uuid
-from prefect import task, flow
 import re
-from athena_mvsh import Athena, CursorParquetDuckdb
 import shutil
+from pyspark.sql import SparkSession
 
-local_files = "M:/lake_house"
+LOCAL_FILES = "M:/lake_house"
 
 
 @dataclass
@@ -92,7 +87,6 @@ def parse_date_expressions(query_string: str | None) -> str | None:
     return re.sub(pattern, replace_match, query_string)
 
 
-@task(log_prints=True)
 def lower_upper_bound(spark: SparkSession, table: SparkTable) -> tuple:
     url = URLMssql(table)
 
@@ -112,7 +106,6 @@ def lower_upper_bound(spark: SparkSession, table: SparkTable) -> tuple:
     return start, end
 
 
-@task(log_prints=True)
 def write_parquet(spark: SparkSession, table: SparkTable, cores: int = 8) -> str:
     start, end = lower_upper_bound(spark, table)
     url = URLMssql(table)
@@ -135,7 +128,7 @@ def write_parquet(spark: SparkSession, table: SparkTable, cores: int = 8) -> str
     rename_cols = {c: c.lower() for c in df.columns}
 
     df.withColumnsRenamed(rename_cols).write.parquet(
-        f"{local_files}/{table.full_name_athena}/{table.full_name_athena}_{uuid.uuid4()}",
+        f"{LOCAL_FILES}/{table.full_name_athena}/{table.full_name_athena}_{uuid.uuid4()}",
         compression="zstd",
         mode="overwrite",
     )
@@ -143,12 +136,11 @@ def write_parquet(spark: SparkSession, table: SparkTable, cores: int = 8) -> str
     return table
 
 
-@task(log_prints=True)
 def overwrite_table_iceberg(
     spark: SparkSession, table: SparkTable, schema: str = "spark_load"
 ) -> SparkTable:
     df = spark.read.parquet(
-        f"{local_files}/{table.full_name_athena}/{table.full_name_athena}_*"
+        f"{LOCAL_FILES}/{table.full_name_athena}/{table.full_name_athena}_*"
     )
 
     (
@@ -169,7 +161,6 @@ def overwrite_table_iceberg(
     return table
 
 
-@task(log_prints=True)
 def optimize_table(
     spark: SparkSession, table: SparkTable, schema: str = "spark_load"
 ) -> SparkTable:
@@ -206,7 +197,6 @@ def optimize_table(
     return table
 
 
-@task(log_prints=True)
 def iter_lower_upper_bound(
     spark: SparkSession, table: SparkTable, chunk: int = 100
 ) -> list[tuple]:
@@ -234,88 +224,6 @@ def iter_lower_upper_bound(
     return lista_batch
 
 
-@task(log_prints=True)
-def merge_table(
-    spark: SparkSession,
-    tbl: SparkTable,
-    predicate: str,
-    schema_target: str = "prevencao-perdas",
-    schema_source: str = "spark_load",
-    alias: tuple = ("t", "s"),
-    drop_table: bool = False,
-) -> None:
-    table = spark.table(f"{schema_source}.{tbl.full_name_athena}")
-    columns = table.columns
-
-    cols = list(map(lambda col: f'"{col}"', columns))
-    target, source = alias
-    update_cols = ", ".join(f"{col} = {source}.{col}" for col in cols)
-    insert_cols = ", ".join(cols)
-    values_cols = ", ".join(f"{source}.{col}" for col in cols)
-
-    stmt = f"""
-        MERGE INTO "{schema_target}"."{tbl.full_name_athena}" AS {target}
-        USING "{schema_source}"."{tbl.full_name_athena}" AS {source}
-        ON ({predicate})
-        WHEN MATCHED
-            THEN UPDATE SET {update_cols}
-        WHEN NOT MATCHED
-            THEN INSERT ({insert_cols}) VALUES ({values_cols})
-    """
-
-    with Athena(
-        cursor=CursorParquetDuckdb(
-            s3_staging_dir="s3://out-of-lake-pmenos-query-results/"
-        )
-    ) as client:
-        client.execute(stmt)
-        if drop_table:
-            client.execute(
-                f"DROP TABLE IF EXISTS {schema_source}.{tbl.full_name_athena}"
-            )
-        client.execute(
-            f"""OPTIMIZE {schema_target}.{tbl.full_name_athena} REWRITE DATA USING BIN_PACK"""
-        )
-        client.execute(f"""VACUUM {schema_target}.{tbl.full_name_athena}""")
-
-
-@task(log_prints=True)
-def create_table_as_full(
-    tbl: SparkTable,
-    schema_target: str = "prevencao-perdas",
-    schema_source: str = "spark_load",
-    drop_table: bool = True,
-) -> None:
-    drop_table_as = "drop table if exists `{schema}`.{table}"
-
-    stmt_create_as = f"""
-    CREATE TABLE "{schema_target}".{tbl.full_name_athena}
-    WITH (
-        table_type = 'ICEBERG',
-        is_external = FALSE,
-        format = 'PARQUET',
-        write_compression = 'ZSTD',
-        location = 's3://out-of-lake-prevencao-perdas/tables/{tbl.full_name_athena}/{uuid.uuid4()}/'
-    ) AS
-    SELECT * FROM {schema_source}.{tbl.full_name_athena}
-    """
-
-    with Athena(
-        cursor=CursorParquetDuckdb(
-            s3_staging_dir="s3://out-of-lake-pmenos-query-results/"
-        )
-    ) as client:
-        client.execute(
-            drop_table_as.format(schema=schema_target, table=tbl.full_name_athena)
-        )
-        client.execute(stmt_create_as)
-        if drop_table:
-            client.execute(
-                drop_table_as.format(schema=schema_source, table=tbl.full_name_athena)
-            )
-
-
-@flow(log_prints=True)
 def main_spark_jdbc(
     server: str,
     database: str,
@@ -328,14 +236,8 @@ def main_spark_jdbc(
     optimize: bool = False,
     iter_lower: bool = True,
     create_table: bool = True,
-    schema_target: str = "prevencao-perdas",
-    schema_source: str = "spark_load",
-    predicate_merge: str | None = None,
-    create_table_as: bool = False,
     drop_table: bool = False,
 ) -> None:
-    """executar no worker PDP0457"""
-
     try:
         spark: SparkSession = SparkSession.builder.appName("job_jdbc").getOrCreate()
         conds = parse_date_expressions(conds)
@@ -364,20 +266,6 @@ def main_spark_jdbc(
             print("2 - OVERWRITE TABLE ICEBERG")
             overwrite_table_iceberg(spark, tbl)
 
-        if create_table_as:
-            print("3 - CREATE TABLE AS")
-            create_table_as_full(tbl, schema_target, schema_source, drop_table)
-
-        if predicate_merge and not create_table_as:
-            print(f"4 - MERGE TABLE ICEBERG -> athena, DROP: {drop_table}")
-            merge_table(
-                spark,
-                tbl,
-                predicate=predicate_merge,
-                schema_source=schema_source,
-                drop_table=drop_table,
-            )
-
         if optimize and not drop_table:
             print("5 - OPTIMIZE TABLE")
             optimize_table(spark, tbl)
@@ -385,5 +273,5 @@ def main_spark_jdbc(
         print(e)
         raise
     finally:
-        shutil.rmtree(f"{local_files}/{tbl.full_name_athena}")
+        shutil.rmtree(f"{LOCAL_FILES}/{tbl.full_name_athena}")
         spark.stop()
