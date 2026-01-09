@@ -8,63 +8,96 @@ Este repositório contém recursos auxiliares (como a pasta `hadoop` com `winuti
 
 ## 🏗 Arquitetura
 
-O fluxo de dados segue a arquitetura abaixo:
+O fluxo de dados utiliza um **Drive de Rede Mapeado (M:)** para garantir que todos os nós (Master e Workers) acessem os arquivos de *staging* intermediários.
 
 ```mermaid
 graph TD
     SQL[SQL Server] -->|JDBC Parallel Read| Spark["Spark Cluster Local<br>(Windows Standalone)"]
-    Spark -->|Write Parquet| LocalStaging["Local Disk<br>(Staging)"]
-    LocalStaging -->|Write Iceberg| S3[AWS S3 Bucket]
+    Spark -->|Write Parquet| SharedDrive["Network Share (M:)<br>(Mapeado em todos os nós)"]
+    SharedDrive -->|Read Staging| Spark
+    Spark -->|Write Iceberg| S3[AWS S3 Bucket]
     Glue[AWS Glue Catalog] -.->|Metastore| S3
+
 ```
 
-## 📋 Pré-requisitos
+## 📋 Pré-requisitos Críticos
 
-Para reproduzir este laboratório, seu ambiente deve atender estritamente às seguintes versões:
+Para reproduzir este laboratório, seu ambiente deve atender estritamente aos requisitos abaixo.
 
-1. **Sistema Operacional:** Windows 10 ou 11.
-2. **Java:** JDK 8 ou 11 (Recomendado JDK 11 para Spark 3.5).
-3. **Python:** **Versão 3.11** (Obrigatório).
-> ⚠️ **Crítico:** Não utilize Python 3.12+. O Spark 3.5 possui incompatibilidades conhecidas (crashes em *daemon processes*) com versões mais recentes.
+### 1. Ambiente de Software
 
+* **Sistema Operacional:** Windows 10 ou 11.
+* **Apache Spark:** Versão 3.5.7 (Binários do Cluster).
+* **Python:** **Versão 3.11** (Obrigatório).
+> ⚠️ **Crítico:** Não use Python 3.12 ou superior. O Apache Spark 3.5 possui incompatibilidades conhecidas (erros de `daemon` e `worker`) com versões recentes do Python.
 
-4. **Apache Spark:** Versão 3.5.7.
+### 2. Configuração do Python (Driver Local)
 
-## ⚙️ Configuração de Variáveis de Ambiente (Obrigatório)
+Você precisa instalar as bibliotecas no computador que executará o script `extract_load_jdbc.py`.
 
-Para que o Spark encontre as dependências, utilize a versão correta do Python nos Workers e autentique na AWS, você **deve** definir as variáveis de ambiente do sistema.
+1. Abra o terminal (CMD ou PowerShell).
+2. Garanta que o comando `python` aponte para a versão 3.11:
+```powershell
+python --version
+# Deve retornar Python 3.11.x
 
-Abra as "Variáveis de Ambiente do Sistema" no Windows e configure:
+```
 
-| Variável | Valor (Exemplo/Descrição) | Motivo |
+3. Instale o **PySpark** via pip. É fundamental que a versão do `pip` seja da mesma família (Major.Minor) do cluster (3.5.x):
+```powershell
+pip install pyspark==3.5.7
+
+```
+
+*(Nota: Se houver outras dependências como `pandas` ou `boto3` para scripts auxiliares, instale-as aqui também).*
+
+### 3. Infraestrutura de Rede (Obrigatório)
+
+Como este é um cluster distribuído, a comunicação e o armazenamento devem ser compartilhados:
+
+1. **Pasta Compartilhada (Drive M:):**
+* A pasta `lake_house` deve estar em uma máquina acessível pela rede.
+* **Importante:** Em **todas** as máquinas (Master e Workers), você deve mapear essa pasta de rede para a letra **`M:`**.
+* O Hadoop no Windows funciona melhor com letras de unidade do que com caminhos UNC (`\\servidor\pasta`).
+* Caminho final esperado: `M:\lake_house`.
+
+2. **Firewall do Windows:**
+* Talvez seja necessário liberar as portas usadas pelo Spark no Firewall de **todas** as máquinas, ou desativá-lo temporariamente para testes na rede privada.
+* **Portas Principais:** 7077 (Master), 8080 (Master UI), 8081 (Worker UI), 4040 (Driver UI), 18080 (History Server) e portas de BlockManager (definidas como 10020-10022 na config).
+
+## ⚙️ Configuração de Variáveis de Ambiente
+
+Configure estas variáveis nas "Variáveis de Ambiente do Sistema" em **todas** as máquinas do cluster.
+
+| Variável | Valor (Exemplo) | Descrição |
 | --- | --- | --- |
-| `HADOOP_HOME` | `C:\caminho\para\pasta\hadoop` | Necessário para `winutils.exe`. |
-| `SPARK_HOME` | `C:\caminho\para\spark-3.5.7-bin-hadoop3` | Local de instalação do Spark. |
-| `PYSPARK_PYTHON` | `python` (ou caminho completo: `C:\Python311\python.exe`) | **Crucial:** Garante que os Workers usem Python 3.11 e não outra versão instalada. |
-| `PYSPARK_DRIVER_PYTHON` | `python` | Garante consistência entre Driver e Executor. |
-| `AWS_ACCESS_KEY_ID` | `SUA_ACCESS_KEY` | Credencial AWS (Spark não lê profiles do `.aws` nativamente neste setup). |
-| `AWS_SECRET_ACCESS_KEY` | `SUA_SECRET_KEY` | Credencial AWS. |
-| `AWS_DEFAULT_REGION` | `us-east-1` (ou sua região) | Região padrão para o cliente S3/Glue. |
+| `HADOOP_HOME` | `C:\hadoop\hadoop-3.3.6` | Pasta contendo `bin\winutils.exe`. |
+| `SPARK_HOME` | `C:\spark\spark-3.5.7-bin-hadoop3` | Instalação do Spark. |
+| `PYSPARK_PYTHON` | `C:\Python311\python.exe` | **Crucial:** Caminho exato do Python 3.11 em todas as máquinas. |
+| `PYSPARK_DRIVER_PYTHON` | `python` | - |
+| `AWS_ACCESS_KEY_ID` | `SUA_KEY` | Credencial AWS. |
+| `AWS_SECRET_ACCESS_KEY` | `SUA_SECRET` | Credencial AWS. |
+| `AWS_DEFAULT_REGION` | `us-east-1` | Região AWS. |
 
-> **Nota:** Adicione também `%HADOOP_HOME%\bin` e `%SPARK_HOME%\bin` à variável **PATH**.
+> Adicione `%HADOOP_HOME%\bin` e `%SPARK_HOME%\bin` à variável **PATH**.
 
 ## 🛠️ Instalação e Configuração
 
 ### 1. Autenticação SQL Server (DLL)
 
-Para usar a **Autenticação Integrada do Windows** (`integratedSecurity=true`) via JDBC, o driver precisa acessar a DLL nativa.
+Para usar a **Autenticação Integrada do Windows** (`integratedSecurity=true`):
 
-1. Neste repositório, navegue até o caminho:
-`C:\estudos\spark-windows-glue\sqljdbc_13.2\ptb\auth\x64`
+1. Vá até: `sqljdbc_13.2\ptb\auth\x64` (neste repositório).
 2. Copie o arquivo **`mssql-jdbc_auth.dll`**.
-3. Cole o arquivo em **`C:\Windows\System32`**.
-* *Alternativa:* Adicione a pasta acima à variável de ambiente `PATH`.
-
-
+3. Cole em **`C:\Windows\System32`** (em todas as máquinas que executarão o Driver/Executor).
 
 ### 2. Configuração do `spark-defaults.conf`
 
-Navegue até `%SPARK_HOME%\conf`, crie/edite o arquivo `spark-defaults.conf` com o conteúdo abaixo. Esta configuração garante a integração com Iceberg, AWS Glue e otimizações de memória.
+Cada máquina (Master e Workers) deve ter seu arquivo configurado. A diferença principal é o endereçamento IP.
+
+**Caminho:** `%SPARK_HOME%\conf\spark-defaults.conf`
+
+#### A. Configuração do MASTER (Ex: IP 192.168.59.62)
 
 ```properties
 # --- Performance e Serialização ---
@@ -74,29 +107,32 @@ spark.sql.adaptive.enabled           true
 spark.sql.adaptive.coalescePartitions.enabled true
 spark.sql.shuffle.partitions         500
 
-# --- Recursos do Cluster ---
+# --- Recursos ---
 spark.executor.instances             2
 spark.executor.cores                 4
 spark.executor.memory                5g
 spark.driver.memory                  2g
 spark.memory.fraction                0.8
 
-# --- Rede e Master Local ---
-# Ajuste o IP conforme sua máquina (ipconfig)
+# --- Rede (MASTER) ---
+# Atenção: O spark.master aponta para si mesmo
 spark.master                         spark://192.168.59.62:7077
+spark.driver.host                    192.168.59.62
+spark.driver.bindAddress             0.0.0.0
+
 spark.master.port                    7077
 spark.master.webui.port              8080
 spark.worker.ui.port                 8081
-spark.driver.host                    192.168.59.62
-spark.driver.bindAddress             0.0.0.0
+spark.blockManager.port              10020
+spark.driver.blockManager.port       10021
+spark.driver.port                    10022
 spark.network.timeout                800s
 spark.executor.heartbeatInterval     60s
 
 # --- Pacotes (Iceberg, AWS, Hadoop, MSSQL) ---
-# O Spark baixará estes JARs automaticamente na primeira execução
 spark.jars.packages                  org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.10.0,org.apache.iceberg:iceberg-aws-bundle:1.10.0,org.apache.hadoop:hadoop-aws:3.3.4,org.apache.hadoop:hadoop-common:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.764,com.microsoft.sqlserver:mssql-jdbc:13.2.1.jre11
 
-# --- Configuração do Catálogo Iceberg (AWS Glue) ---
+# --- Configuração Iceberg/Glue e S3 ---
 spark.sql.defaultCatalog             dev
 spark.sql.catalog.dev                org.apache.iceberg.spark.SparkCatalog
 spark.sql.catalog.dev.type           glue
@@ -106,18 +142,34 @@ spark.sql.catalog.dev.s3.cross-region-access-enabled true
 spark.sql.catalog.dev.glue.skip-name-validation      true
 spark.sql.extensions                 org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
 
-# --- Otimização S3 ---
 spark.hadoop.fs.s3.impl              org.apache.hadoop.fs.s3a.S3AFileSystem
 spark.hadoop.fs.s3a.impl             org.apache.hadoop.fs.s3a.S3AFileSystem
 spark.hadoop.fs.s3a.fast.upload      true
-spark.hadoop.fs.s3a.multipart.size   100M
 spark.sql.parquet.int96RebaseModeInWrite CORRECTED
 
-# --- Logs e History Server ---
+# --- Logs ---
 spark.eventLog.enabled               true
 spark.eventLog.dir                   file:///C:/spark/spark-3.5.7-bin-hadoop3/spark-events
 spark.history.fs.logDirectory        file:///C:/spark/spark-3.5.7-bin-hadoop3/spark-events
 spark.history.ui.port                18080
+
+```
+
+#### B. Configuração dos WORKERS (Ex: IP 192.168.59.63)
+
+No arquivo `spark-defaults.conf` da máquina Worker, você deve alterar as configurações de rede para refletir o IP daquela máquina específica, mas **mantendo o apontamento para o Master**.
+
+```properties
+# --- Rede (WORKER) ---
+# Aponta para o IP do Master
+spark.master                         spark://192.168.59.62:7077 
+
+# Aponta para o IP DESTA máquina (Worker)
+spark.driver.host                    192.168.59.63
+spark.driver.bindAddress             0.0.0.0
+
+# Demais configurações (Pacotes, Iceberg, Logs) devem ser IDÊNTICAS ao Master
+# ... copie o restante do arquivo do Master ...
 
 ```
 
@@ -127,36 +179,40 @@ spark.history.ui.port                18080
 
 ### 1. Iniciar o Cluster
 
-Abra terminais separados (Powershell ou CMD) para Master e Worker:
+Abra terminais (como Administrador se necessário para portas):
+
+**No PC Master:**
 
 ```powershell
-# Terminal 1: Iniciar Master
 spark-class org.apache.spark.deploy.master.Master
-
-# Terminal 2: Iniciar Worker (aponte para o IP do master exibido no log anterior)
+# Em outro terminal (se o Master também for Worker)
 spark-class org.apache.spark.deploy.worker.Worker spark://192.168.59.62:7077
 
 ```
 
-### 2. Iniciar o Job Python
+**Nos PCs Workers:**
 
-Com as variáveis `AWS_ACCESS_KEY_ID` e `PYSPARK_PYTHON` configuradas, execute:
+```powershell
+spark-class org.apache.spark.deploy.worker.Worker spark://192.168.59.62:7077
+
+```
+
+### 2. Verificar Conectividade
+
+Acesse `http://192.168.59.62:8080` (IP do Master). Você deve ver todos os Workers listados como **ALIVE**. Se não estiverem, verifique o Firewall e se o drive `M:` está acessível.
+
+### 3. Executar o Job Python
 
 ```bash
-python main_pipeline.py
+python extract_load_jdbc.py
 
 ```
 
 ---
 
-## 🐍 Código da Aplicação (`main_pipeline.py`)
+## 🐍 Código da Aplicação (`extract_load_jdbc.py`)
 
-Este script contém a lógica completa de ETL:
-
-1. **Extração Paralela (JDBC):** Usa `lowerBound`/`upperBound` para particionar a leitura do SQL Server.
-2. **Staging Local:** Salva em Parquet/ZSTD localmente para evitar gargalos de rede.
-3. **Carga Iceberg:** Envia para o S3 com estratégia *Merge-on-Read*.
-4. **Manutenção:** Executa compactação e limpeza de snapshots.
+O código abaixo realiza a orquestração do pipeline. Note que a variável `LOCAL_FILES` aponta para `M:/lake_house`, garantindo que qualquer Worker possa escrever e ler os dados.
 
 ```python
 from datetime import datetime, timedelta
@@ -166,6 +222,7 @@ import re
 import shutil
 from pyspark.sql import SparkSession
 
+# IMPORTANTE: Caminho mapeado na rede acessível por todos os Workers
 LOCAL_FILES = "M:/lake_house"
 
 @dataclass
@@ -210,7 +267,7 @@ class URLMssql:
         }
 
 def parse_date_expressions(query_string: str | None) -> str | None:
-    """Substitui placeholders como {hoje}, {ontem-1d} por datas reais."""
+    """Interpreta placeholders de data ({hoje}, {ontem}) na query."""
     if not query_string:
         return query_string
 
@@ -246,7 +303,7 @@ def parse_date_expressions(query_string: str | None) -> str | None:
     return re.sub(pattern, replace_match, query_string)
 
 def lower_upper_bound(spark: SparkSession, table: SparkTable) -> tuple:
-    """Calcula limites MIN/MAX da PK para paralelismo JDBC."""
+    """Busca limites da PK para particionamento JDBC."""
     url = URLMssql(table)
     stmt = f"""
     select 
@@ -261,7 +318,7 @@ def lower_upper_bound(spark: SparkSession, table: SparkTable) -> tuple:
     return start, end
 
 def write_parquet(spark: SparkSession, table: SparkTable, cores: int = 8) -> str:
-    """Extrai do SQL Server em paralelo e salva em Staging Local (Parquet)."""
+    """Salva dados do SQL Server na pasta de rede M:/lake_house."""
     start, end = lower_upper_bound(spark, table)
     url = URLMssql(table)
 
@@ -289,7 +346,8 @@ def write_parquet(spark: SparkSession, table: SparkTable, cores: int = 8) -> str
     return table
 
 def overwrite_table_iceberg(spark: SparkSession, table: SparkTable, schema: str = "spark_load") -> SparkTable:
-    """Lê do Staging Local e sobrescreve tabela Iceberg no S3."""
+    """Lê da pasta de rede e escreve na AWS (Iceberg/S3)."""
+    # Importante: Lê de M:/... onde os workers salvaram os arquivos
     df = spark.read.parquet(f"{LOCAL_FILES}/{table.full_name_athena}/{table.full_name_athena}_*")
     (
         df.coalesce(24)
@@ -308,7 +366,7 @@ def overwrite_table_iceberg(spark: SparkSession, table: SparkTable, schema: str 
     return table
 
 def optimize_table(spark: SparkSession, table: SparkTable, schema: str = "spark_load") -> SparkTable:
-    """Executa manutenção: compactação, expiração de snapshots e limpeza."""
+    """Executa manutenção na tabela Iceberg."""
     print(" => rewrite_data_files")
     table_name = f"{schema}.{table.full_name_athena}"
     spark.sql(f"""
@@ -338,7 +396,7 @@ def optimize_table(spark: SparkSession, table: SparkTable, schema: str = "spark_
     return table
 
 def iter_lower_upper_bound(spark: SparkSession, table: SparkTable, chunk: int = 100) -> list[tuple]:
-    """Gera lotes de IDs para tabelas muito grandes."""
+    """Itera em lotes para grandes volumes de dados."""
     url = URLMssql(table)
     stmt = f"""
     select distinct {table.primary_key} as chave
@@ -400,3 +458,33 @@ def main_spark_jdbc(
         spark.stop()
 
 ```
+
+## 📥 Anexos: Downloads e Observações
+
+### Observações Importantes
+
+* **Java Auto-detect:** Não foi preciso configurar a variável de ambiente `JAVA_HOME` manualmente na instalação. O Apache Spark conseguiu identificar a instalação do Java automaticamente no PATH do sistema.
+* **Python Version:** Lembre-se que o uso do Python 3.11 é mandatório para evitar falhas de execução no Spark 3.5.
+
+### Links para Download
+
+* **Apache Spark 3.5.7:**
+[Download Spark](https://spark.apache.org/downloads.html)
+* **Java (JDK 11):**
+[Download Microsoft Build of OpenJDK 11](https://learn.microsoft.com/en-us/java/openjdk/download)
+* **Driver JDBC SQL Server (mssql-jdbc):**
+[Download Microsoft JDBC Driver for SQL Server](https://learn.microsoft.com/pt-br/sql/connect/jdbc/download-microsoft-jdbc-driver-for-sql-server)
+*(Baixe a versão .zip para extrair a DLL de autenticação)*
+
+### ☁️ Configuração AWS Glue e Permissões IAM
+
+A configuração detalhada do ambiente na nuvem AWS foge do escopo deste documento, que foca na infraestrutura local do Spark. No entanto, para que o código funcione, o ambiente AWS deve possuir:
+
+1. **Bucket S3:** Um bucket criado (ex: `data-warehouse`) onde o Spark terá permissão de leitura/escrita.
+2. **Glue Database:** Um banco de dados vazio criado no Glue Data Catalog (ex: `dev`).
+3. **Permissões IAM:** As credenciais (`AWS_ACCESS_KEY_ID` e `SECRET`) usadas nas variáveis de ambiente devem pertencer a um usuário IAM com as políticas adequadas (ex: `AWSGlueConsoleFullAccess` e `AmazonS3FullAccess` ou políticas personalizadas mais restritivas).
+
+**Conteúdo Recomendado para Estudo:**
+
+* [AWS Documentation: Using the AWS Glue Data Catalog as the metastore for Apache Iceberg](https://docs.aws.amazon.com/glue/latest/dg/aws-glue-programming-etl-format-iceberg.html)
+* [Apache Iceberg Documentation: AWS Integration](https://iceberg.apache.org/docs/latest/aws/)
