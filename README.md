@@ -4,7 +4,7 @@ Este projeto documenta e implementa um pipeline de dados distribuído (ETL) exec
 
 ![Estrutura do projeto](img/projeto_spark.png)
 
-Este repositório contém todos os binários necessários (`winutils`, `.dll`) para facilitar a configuração em ambiente Windows.
+Este repositório contém recursos auxiliares (como a pasta `hadoop` com `winutils.exe`) necessários para o ambiente Windows.
 
 ## 🏗 Arquitetura
 
@@ -12,63 +12,60 @@ O fluxo de dados segue a arquitetura abaixo:
 
 ```mermaid
 graph LR
-    SQL[SQL Server] -->|JDBC Parallel Read| Spark["Spark Cluster Local (Windows Standalone)"]
-    Spark -->|Write Parquet| LocalStaging["Local Disk (Staging)"]
+    SQL[SQL Server] -->|JDBC Parallel Read| Spark["Spark Cluster Local\n(Windows Standalone)"]
+    Spark -->|Write Parquet| LocalStaging["Local Disk\n(Staging)"]
     LocalStaging -->|Write Iceberg| S3[AWS S3 Bucket]
     Glue[AWS Glue Catalog] -.->|Metastore| S3
 
 ```
 
-## 📋 Pré-requisitos e Dependências
+## 📋 Pré-requisitos
 
-Para reproduzir este laboratório, seu ambiente deve atender estritamente às seguintes versões para evitar incompatibilidades conhecidas:
+Para reproduzir este laboratório, seu ambiente deve atender estritamente às seguintes versões:
 
 1. **Sistema Operacional:** Windows 10 ou 11.
 2. **Java:** JDK 8 ou 11 (Recomendado JDK 11 para Spark 3.5).
 3. **Python:** **Versão 3.11** (Obrigatório).
-> ⚠️ **Atenção:** Não utilize Python 3.12 ou superior. Existe um bug conhecido de incompatibilidade com o Apache Spark 3.5 que causa *crashes* silenciosos (SegFaults) durante a execução dos executors.
+> ⚠️ **Crítico:** Não utilize Python 3.12+. O Spark 3.5 possui incompatibilidades conhecidas (crashes em *daemon processes*) com versões mais recentes.
 
 
 4. **Apache Spark:** Versão 3.5.7.
 
-## ⚙️ Instalação e Configuração
+## ⚙️ Configuração de Variáveis de Ambiente (Obrigatório)
 
-Este repositório já inclui dependências críticas para o funcionamento do Hadoop no Windows e autenticação do SQL Server.
+Para que o Spark encontre as dependências, utilize a versão correta do Python nos Workers e autentique na AWS, você **deve** definir as variáveis de ambiente do sistema.
 
-### 1. Configurar Hadoop (Winutils)
+Abra as "Variáveis de Ambiente do Sistema" no Windows e configure:
 
-O Spark no Windows precisa de binários nativos do Hadoop para operações de I/O.
+| Variável | Valor (Exemplo/Descrição) | Motivo |
+| --- | --- | --- |
+| `HADOOP_HOME` | `C:\caminho\para\pasta\hadoop` | Necessário para `winutils.exe`. |
+| `SPARK_HOME` | `C:\caminho\para\spark-3.5.7-bin-hadoop3` | Local de instalação do Spark. |
+| `PYSPARK_PYTHON` | `python` (ou caminho completo: `C:\Python311\python.exe`) | **Crucial:** Garante que os Workers usem Python 3.11 e não outra versão instalada. |
+| `PYSPARK_DRIVER_PYTHON` | `python` | Garante consistência entre Driver e Executor. |
+| `AWS_ACCESS_KEY_ID` | `SUA_ACCESS_KEY` | Credencial AWS (Spark não lê profiles do `.aws` nativamente neste setup). |
+| `AWS_SECRET_ACCESS_KEY` | `SUA_SECRET_KEY` | Credencial AWS. |
+| `AWS_DEFAULT_REGION` | `us-east-1` (ou sua região) | Região padrão para o cliente S3/Glue. |
 
-1. Localize a pasta `hadoop` neste repositório.
-2. Copie a pasta para um local fixo, ex: `C:\hadoop`.
-3. Defina a variável de ambiente:
-* `HADOOP_HOME = C:\hadoop`
+> **Nota:** Adicione também `%HADOOP_HOME%\bin` e `%SPARK_HOME%\bin` à variável **PATH**.
+
+## 🛠️ Instalação e Configuração
+
+### 1. Autenticação SQL Server (DLL)
+
+Para usar a **Autenticação Integrada do Windows** (`integratedSecurity=true`) via JDBC, o driver precisa acessar a DLL nativa.
+
+1. Neste repositório, navegue até o caminho:
+`C:\estudos\spark-windows-glue\sqljdbc_13.2\ptb\auth\x64`
+2. Copie o arquivo **`mssql-jdbc_auth.dll`**.
+3. Cole o arquivo em **`C:\Windows\System32`**.
+* *Alternativa:* Adicione a pasta acima à variável de ambiente `PATH`.
 
 
-4. Adicione ao **PATH** do Windows: `%HADOOP_HOME%\bin`.
 
-### 2. Configurar Autenticação SQL Server
+### 2. Configuração do `spark-defaults.conf`
 
-Para usar `integratedSecurity=true` (Autenticação do Windows) via JDBC:
-
-1. Localize o arquivo `mssql-jdbc_auth.dll` na pasta `libs` ou `hadoop/bin` deste repositório.
-2. Copie este arquivo para `C:\Windows\System32` **OU** certifique-se de que a pasta onde ele está esteja no seu **PATH**.
-
-### 3. Configurar Apache Spark
-
-1. Baixe e extraia o Apache Spark 3.5.7.
-2. Defina `SPARK_HOME` apontando para a pasta extraída.
-3. Adicione `%SPARK_HOME%\bin` ao **PATH**.
-
-### 4. Configuração do `spark-defaults.conf`
-
-Navegue até `%SPARK_HOME%\conf`, renomeie `spark-defaults.conf.template` para `spark-defaults.conf` e substitua o conteúdo pelo abaixo.
-
-**Destaques da Configuração:**
-
-* **Integração Iceberg/AWS:** Os pacotes (`spark.jars.packages`) baixam automaticamente as dependências do Iceberg, AWS SDK e conector MSSQL.
-* **Otimização Local:** Uso de `KryoSerializer` e ajuste de memória para rodar em desktop.
-* **Monitoramento:** Logs de eventos ativados para o Spark History Server.
+Navegue até `%SPARK_HOME%\conf`, crie/edite o arquivo `spark-defaults.conf` com o conteúdo abaixo. Esta configuração garante a integração com Iceberg, AWS Glue e otimizações de memória.
 
 ```properties
 # --- Performance e Serialização ---
@@ -78,7 +75,7 @@ spark.sql.adaptive.enabled           true
 spark.sql.adaptive.coalescePartitions.enabled true
 spark.sql.shuffle.partitions         500
 
-# --- Recursos do Cluster (Ajuste conforme sua RAM) ---
+# --- Recursos do Cluster ---
 spark.executor.instances             2
 spark.executor.cores                 4
 spark.executor.memory                5g
@@ -86,6 +83,7 @@ spark.driver.memory                  2g
 spark.memory.fraction                0.8
 
 # --- Rede e Master Local ---
+# Ajuste o IP conforme sua máquina (ipconfig)
 spark.master                         spark://192.168.59.62:7077
 spark.master.port                    7077
 spark.master.webui.port              8080
@@ -130,29 +128,20 @@ spark.history.ui.port                18080
 
 ### 1. Iniciar o Cluster
 
-Abra o terminal (Powershell ou CMD) e inicie o Master e o Worker:
+Abra terminais separados (Powershell ou CMD) para Master e Worker:
 
 ```powershell
-# Iniciar Master
+# Terminal 1: Iniciar Master
 spark-class org.apache.spark.deploy.master.Master
 
-# Em outro terminal, Iniciar Worker (aponte para o IP do seu master)
+# Terminal 2: Iniciar Worker (aponte para o IP do master exibido no log anterior)
 spark-class org.apache.spark.deploy.worker.Worker spark://192.168.59.62:7077
 
 ```
 
-### 2. Iniciar o History Server (Opcional, para monitoramento)
+### 2. Iniciar o Job Python
 
-```powershell
-spark-class org.apache.spark.deploy.history.HistoryServer
-
-```
-
-Acesse `http://localhost:18080` para ver os logs de execução.
-
-### 3. Executar o Job Python
-
-Certifique-se de que suas credenciais AWS estão configuradas (variáveis de ambiente ou `~/.aws/credentials`).
+Com as variáveis `AWS_ACCESS_KEY_ID` e `PYSPARK_PYTHON` configuradas, execute:
 
 ```bash
 python main_pipeline.py
@@ -161,58 +150,14 @@ python main_pipeline.py
 
 ---
 
-## 🐍 Explicação do Código (`main_pipeline.py`)
+## 🐍 Código da Aplicação (`main_pipeline.py`)
 
-O script Python é modularizado para garantir robustez e performance. Abaixo, a explicação detalhada de cada componente.
+Este script contém a lógica completa de ETL:
 
-### 1. Classes de Dados (`SparkTable` e `URLMssql`)
-
-Utilizamos `dataclasses` para evitar "hardcoding" de strings e facilitar a manutenção.
-
-* **`SparkTable`**: Define a estrutura da tabela (servidor, banco, schema, chaves). Gera automaticamente os nomes qualificados para SQL Server e AWS Athena/Glue.
-* **`URLMssql`**: Constrói a string de conexão JDBC complexa, injetando configurações de segurança (`integratedSecurity=true`) e performance.
-
-### 2. Tratamento Dinâmico de Datas (`parse_date_expressions`)
-
-Permite usar placeholders na string de condição, facilitando agendamentos (Airflow/Cron) sem alterar o código.
-
-* **Funcionalidade:** Substitui termos como `{hoje}`, `{ontem}`, `{inicio_mes}` e operações aritméticas (ex: `{hoje-3d}`) pelas datas reais no momento da execução.
-
-### 3. Paralelismo Inteligente (`lower_upper_bound` e `iter_lower_upper_bound`)
-
-O gargalo do JDBC é ler tudo em uma única thread. Estas funções resolvem isso:
-
-* **`lower_upper_bound`**: Consulta o `MIN` e `MAX` da chave primária (PK) na origem. Esses valores alimentam as opções `lowerBound` e `upperBound` do Spark JDBC, permitindo que o Spark divida a leitura em N partições simultâneas (definido por `numPartitions`).
-* **`iter_lower_upper_bound`**: Para tabelas muito grandes, quebra a leitura em "lotes" (chunks) lógicos, evitando sobrecarregar a memória do driver ou do banco de dados.
-
-### 4. Extração e Staging (`write_parquet`)
-
-* Lê do SQL Server usando as partições calculadas.
-* Normaliza colunas para minúsculo (boa prática para Data Lakes).
-* Escreve em disco local (`LOCAL_FILES`) em formato **Parquet** com compressão **ZSTD**. Isso serve como uma área de *staging* segura antes do upload para nuvem.
-
-### 5. Carga no Data Lake (`overwrite_table_iceberg`)
-
-* Lê os arquivos Parquet locais.
-* Escreve na tabela Iceberg no S3 (`glue.db.table`).
-* **Propriedades Críticas:**
-* `write.format.default`: Parquet.
-* `write.merge.mode`: **merge-on-read** (Ideal para atualizações frequentes, grava deltas rapidamente).
-* `write.target-file-size-bytes`: 128MB (Otimizado para leitura de engines como Trino/Athena).
-
-
-
-### 6. Manutenção Automática (`optimize_table`)
-
-O Iceberg requer manutenção para não degradar a performance (problema de "small files"). O script executa automaticamente ao final:
-
-1. **`rewrite_data_files`**: Compacta arquivos pequenos em arquivos maiores (bin-packing).
-2. **`expire_snapshots`**: Remove versões antigas da tabela (time travel) para economizar espaço no S3.
-3. **`remove_orphan_files`**: Limpa arquivos que não estão mais referenciados em nenhum snapshot.
-
----
-
-## 📄 Código Completo
+1. **Extração Paralela (JDBC):** Usa `lowerBound`/`upperBound` para particionar a leitura do SQL Server.
+2. **Staging Local:** Salva em Parquet/ZSTD localmente para evitar gargalos de rede.
+3. **Carga Iceberg:** Envia para o S3 com estratégia *Merge-on-Read*.
+4. **Manutenção:** Executa compactação e limpeza de snapshots.
 
 ```python
 from datetime import datetime, timedelta
@@ -266,6 +211,7 @@ class URLMssql:
         }
 
 def parse_date_expressions(query_string: str | None) -> str | None:
+    """Substitui placeholders como {hoje}, {ontem-1d} por datas reais."""
     if not query_string:
         return query_string
 
@@ -301,6 +247,7 @@ def parse_date_expressions(query_string: str | None) -> str | None:
     return re.sub(pattern, replace_match, query_string)
 
 def lower_upper_bound(spark: SparkSession, table: SparkTable) -> tuple:
+    """Calcula limites MIN/MAX da PK para paralelismo JDBC."""
     url = URLMssql(table)
     stmt = f"""
     select 
@@ -315,6 +262,7 @@ def lower_upper_bound(spark: SparkSession, table: SparkTable) -> tuple:
     return start, end
 
 def write_parquet(spark: SparkSession, table: SparkTable, cores: int = 8) -> str:
+    """Extrai do SQL Server em paralelo e salva em Staging Local (Parquet)."""
     start, end = lower_upper_bound(spark, table)
     url = URLMssql(table)
 
@@ -342,6 +290,7 @@ def write_parquet(spark: SparkSession, table: SparkTable, cores: int = 8) -> str
     return table
 
 def overwrite_table_iceberg(spark: SparkSession, table: SparkTable, schema: str = "spark_load") -> SparkTable:
+    """Lê do Staging Local e sobrescreve tabela Iceberg no S3."""
     df = spark.read.parquet(f"{LOCAL_FILES}/{table.full_name_athena}/{table.full_name_athena}_*")
     (
         df.coalesce(24)
@@ -360,6 +309,7 @@ def overwrite_table_iceberg(spark: SparkSession, table: SparkTable, schema: str 
     return table
 
 def optimize_table(spark: SparkSession, table: SparkTable, schema: str = "spark_load") -> SparkTable:
+    """Executa manutenção: compactação, expiração de snapshots e limpeza."""
     print(" => rewrite_data_files")
     table_name = f"{schema}.{table.full_name_athena}"
     spark.sql(f"""
@@ -389,6 +339,7 @@ def optimize_table(spark: SparkSession, table: SparkTable, schema: str = "spark_
     return table
 
 def iter_lower_upper_bound(spark: SparkSession, table: SparkTable, chunk: int = 100) -> list[tuple]:
+    """Gera lotes de IDs para tabelas muito grandes."""
     url = URLMssql(table)
     stmt = f"""
     select distinct {table.primary_key} as chave
