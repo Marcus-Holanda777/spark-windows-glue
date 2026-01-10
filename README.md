@@ -29,7 +29,7 @@ Para reproduzir este laboratório, seu ambiente deve atender estritamente aos re
 * **Sistema Operacional:** Windows 10 ou 11.
 * **Apache Spark:** Versão 3.5.7 (Binários do Cluster).
 * **Python:** **Versão 3.11** (Obrigatório).
-> ⚠️ **Crítico:** Não use Python 3.12 ou superior. O Apache Spark 3.5 possui incompatibilidades conhecidas (erros de `daemon` e `worker`) com versões recentes do Python.
+> ⚠️ **Crítico:** Não use Python 3.12 ou superior. O PySpark trava ao chamar `createDataFrame()` no modo local do Spark no Windows com Spark 3.5+ e Python 3.12+.
 
 ### 2. Configuração do Python (Driver Local)
 
