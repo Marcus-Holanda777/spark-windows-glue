@@ -153,7 +153,16 @@ spark.eventLog.dir                   file:///C:/spark/spark-3.5.7-bin-hadoop3/sp
 spark.history.fs.logDirectory        file:///C:/spark/spark-3.5.7-bin-hadoop3/spark-events
 spark.history.ui.port                18080
 
+# --- Limpeza Automática do Worker (Importante) ---
+# Evita que a pasta 'work' lote o disco com logs de aplicações antigas
+spark.worker.cleanup.enabled         true
+spark.worker.cleanup.interval        1800
+spark.worker.cleanup.appDataTtl      600
+
 ```
+
+> [!IMPORTANT]
+> A pasta `spark-events` sera a pasta que o servidor de histórico do **Spark** vai procurar os logs ela deve ser criada manualmente.
 
 #### B. Configuração dos WORKERS (Ex: IP 192.168.59.63)
 
@@ -188,6 +197,9 @@ spark-class org.apache.spark.deploy.master.Master
 # Em outro terminal (se o Master também for Worker)
 spark-class org.apache.spark.deploy.worker.Worker spark://192.168.59.62:7077
 
+# Iniciar History Server (Para ver logs de jobs passados)
+spark-class org.apache.spark.deploy.history.HistoryServer
+
 ```
 
 **Nos PCs Workers:**
@@ -200,6 +212,8 @@ spark-class org.apache.spark.deploy.worker.Worker spark://192.168.59.62:7077
 ### 2. Verificar Conectividade
 
 Acesse `http://192.168.59.62:8080` (IP do Master). Você deve ver todos os Workers listados como **ALIVE**. Se não estiverem, verifique o Firewall e se o drive `M:` está acessível.
+
+History Server: `http://192.168.59.62:18080` (Logs detalhados de jobs concluídos).
 
 ### 3. Executar o Job Python
 
